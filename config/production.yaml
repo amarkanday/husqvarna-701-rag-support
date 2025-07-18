@@ -1,0 +1,58 @@
+# Production Configuration
+app:
+  name: "Husqvarna 701 RAG Support System"
+  version: "1.0.0"
+  debug: false
+  host: "0.0.0.0"
+  port: 8000
+
+database:
+  dataset_id: "husqvarna_rag_dataset_prod"
+  table_id: "document_chunks"
+  location: "us-central1"
+
+models:
+  embedding: "textembedding-gecko@003"
+  generation: "gemini-1.5-pro"
+  max_tokens: 2048
+  temperature: 0.1
+
+cache:
+  ttl_hours: 24
+  max_size: 5000
+  redis_url: "${REDIS_URL}"
+
+safety:
+  min_safety_level: 2
+  emphasize_warnings: true
+  safety_keywords:
+    - "danger"
+    - "warning"
+    - "caution"
+    - "critical"
+    - "safety"
+    - "risk"
+
+logging:
+  level: "INFO"
+  format: "json"
+  handlers:
+    - console
+    - cloud_logging
+
+monitoring:
+  enabled: true
+  metrics_port: 9090
+  health_check_interval: 60
+
+api:
+  cors_origins:
+    - "https://yourdomain.com"
+    - "https://api.yourdomain.com"
+  rate_limit: 1000
+  timeout: 60
+
+security:
+  jwt_secret: "${JWT_SECRET}"
+  api_key_required: true
+  rate_limiting: true 
