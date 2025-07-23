@@ -17,6 +17,13 @@ from .safety_enhancement import SafetyEnhancer
 from .response_generation import ResponseGenerator
 from .config import RAGConfig
 
+from typing import List, Dict
+from google.cloud import bigquery
+import vertexai
+from vertexai.language_models import TextGenerationModel
+from ..models.embeddings import EmbeddingGenerator
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,216 +39,152 @@ class QueryResult:
 
 
 class HusqvarnaRAGSystem:
-    """
-    Main RAG system for Husqvarna 701 Enduro technical support.
-    
-    This system combines Owner's Manual and Repair Manual data to provide
-    comprehensive, accurate answers to motorcycle maintenance and repair questions.
-    """
+    """Core RAG system for Husqvarna 701 technical support."""
     
     def __init__(
         self,
         project_id: str,
         location: str = "us-central1",
-        config: Optional[RAGConfig] = None
+        dataset_id: str = "husqvarna_rag_dataset",
+        table_id: str = "document_chunks",
+        max_chunks: int = 5
     ):
-        """
-        Initialize the RAG system.
+        """Initialize the RAG system.
         
         Args:
             project_id: Google Cloud project ID
-            location: Google Cloud location
-            config: Configuration object
+            location: Google Cloud region
+            dataset_id: BigQuery dataset ID
+            table_id: BigQuery table ID
+            max_chunks: Maximum number of chunks to retrieve
         """
         self.project_id = project_id
         self.location = location
-        self.config = config or RAGConfig()
+        self.dataset_id = dataset_id
+        self.table_id = table_id
+        self.max_chunks = max_chunks
         
-        # Initialize components
-        self.bigquery_client = BigQueryClient(project_id, location)
-        self.vector_search = VectorSearch(self.bigquery_client)
-        self.document_processor = DocumentProcessor()
-        self.embedding_model = EmbeddingModel(self.config.embedding_model)
-        self.generation_model = GenerationModel(self.config.generation_model)
-        self.intent_detector = IntentDetector()
-        self.safety_enhancer = SafetyEnhancer()
-        self.response_generator = ResponseGenerator(self.generation_model)
-        
-        logger.info(f"Initialized Husqvarna RAG System for project {project_id}")
+        # Initialize clients
+        self.bq_client = bigquery.Client()
+        vertexai.init(project=project_id, location=location)
+        self.embedding_generator = EmbeddingGenerator(project_id, location)
+        self.llm = TextGenerationModel.from_pretrained("gemini-1.0-pro")
     
-    async def setup_complete_system(self) -> None:
-        """
-        Setup the complete system including BigQuery resources and data import.
-        """
-        logger.info("Setting up complete RAG system...")
-        
-        # Create BigQuery resources
-        await self.bigquery_client.create_dataset_if_not_exists()
-        await self.bigquery_client.create_tables_if_not_exists()
-        
-        # Import and process manuals
-        await self._import_manuals()
-        
-        logger.info("RAG system setup complete")
-    
-    async def _import_manuals(self) -> None:
-        """Import and process Husqvarna manuals."""
-        logger.info("Importing Husqvarna manuals...")
-        
-        # Process Owner's Manual
-        owners_manual_chunks = await self.document_processor.process_manual(
-            "data/manuals/owners_manual.pdf",
-            manual_type="owners"
-        )
-        
-        # Process Repair Manual
-        repair_manual_chunks = await self.document_processor.process_manual(
-            "data/manuals/repair_manual.pdf",
-            manual_type="repair"
-        )
-        
-        # Generate embeddings
-        all_chunks = owners_manual_chunks + repair_manual_chunks
-        embeddings = await self.embedding_model.generate_embeddings(all_chunks)
-        
-        # Store in BigQuery
-        await self.bigquery_client.insert_chunks_with_embeddings(
-            all_chunks, embeddings
-        )
-        
-        logger.info(f"Imported {len(all_chunks)} chunks with embeddings")
-    
-    async def query_system(
+    def query(
         self,
         query: str,
-        user_skill_level: str = "intermediate",
-        max_chunks: int = 5,
-        **kwargs
-    ) -> QueryResult:
-        """
-        Query the RAG system for technical support.
+        skill_level: str = "intermediate"
+    ) -> str:
+        """Process a user query.
         
         Args:
             query: User's question
-            user_skill_level: User's skill level (beginner, intermediate, expert)
-            max_chunks: Maximum number of chunks to retrieve
-            **kwargs: Additional configuration options
+            skill_level: User's skill level (beginner/intermediate/expert)
             
         Returns:
-            QueryResult with answer and metadata
+            Generated response
         """
-        import time
-        start_time = time.time()
+        # Generate query embedding
+        query_embedding = self.embedding_generator.generate_embeddings([query])[0]
         
-        try:
-            # Detect intent and safety level
-            intent = await self.intent_detector.detect_intent(query)
-            safety_level = await self.safety_enhancer.assess_safety_level(query)
-            
-            # Generate query embedding
-            query_embedding = await self.embedding_model.generate_embedding(query)
-            
-            # Search for relevant chunks
-            chunks = await self.vector_search.search_similar_chunks(
-                query_embedding,
-                max_results=max_chunks,
-                safety_level=safety_level
-            )
-            
-            # Generate response
-            context = self._build_context(chunks, intent, user_skill_level)
-            response = await self.response_generator.generate_response(
-                query, context, user_skill_level, **kwargs
-            )
-            
-            # Enhance with safety warnings
-            enhanced_response = await self.safety_enhancer.enhance_response(
-                response, safety_level, chunks
-            )
-            
-            processing_time = time.time() - start_time
-            
-            return QueryResult(
-                answer=enhanced_response,
-                sources=[chunk.to_dict() for chunk in chunks],
-                confidence=self._calculate_confidence(chunks),
-                safety_level=safety_level,
-                processing_time=processing_time,
-                metadata={
-                    "intent": intent,
-                    "user_skill_level": user_skill_level,
-                    "chunks_retrieved": len(chunks)
-                }
-            )
-            
-        except Exception as e:
-            logger.error(f"Error processing query: {e}")
-            raise
+        # Retrieve relevant chunks
+        chunks = self._retrieve_chunks(query_embedding)
+        
+        # Generate response
+        response = self._generate_response(query, chunks, skill_level)
+        
+        return response
     
-    def _build_context(
-        self,
-        chunks: List[Any],
-        intent: str,
-        user_skill_level: str
-    ) -> str:
-        """Build context from retrieved chunks."""
-        context_parts = []
-        
-        for i, chunk in enumerate(chunks, 1):
-            context_parts.append(
-                f"Source {i} ({chunk.manual_type}, {chunk.section}):\n{chunk.content}\n"
-            )
-        
-        context = "\n".join(context_parts)
-        
-        # Add intent and skill level context
-        context += f"\nQuery Intent: {intent}\nUser Skill Level: {user_skill_level}"
-        
-        return context
-    
-    def _calculate_confidence(self, chunks: List[Any]) -> float:
-        """Calculate confidence score based on chunk relevance."""
-        if not chunks:
-            return 0.0
-        
-        # Simple confidence calculation based on chunk scores
-        scores = [chunk.similarity_score for chunk in chunks]
-        return sum(scores) / len(scores)
-    
-    async def batch_query(
-        self,
-        queries: List[str],
-        user_skill_level: str = "intermediate"
-    ) -> List[QueryResult]:
-        """
-        Process multiple queries in batch.
+    def _retrieve_chunks(self, query_embedding: List[float]) -> List[Dict]:
+        """Retrieve relevant chunks using vector similarity.
         
         Args:
-            queries: List of queries to process
-            user_skill_level: User's skill level
+            query_embedding: Query embedding vector
             
         Returns:
-            List of QueryResult objects
+            List of relevant chunks
         """
-        tasks = [
-            self.query_system(query, user_skill_level)
-            for query in queries
-        ]
+        # Construct similarity query
+        embedding_str = str(query_embedding)
+        query = f"""
+        SELECT
+            chunk_id,
+            content,
+            source,
+            page_number,
+            safety_level,
+            (
+                SELECT cosine_similarity(embedding, {embedding_str})
+            ) as similarity
+        FROM `{self.project_id}.{self.dataset_id}.{self.table_id}`
+        ORDER BY similarity DESC
+        LIMIT {self.max_chunks}
+        """
         
-        return await asyncio.gather(*tasks, return_exceptions=True)
-    
-    async def get_system_stats(self) -> Dict[str, Any]:
-        """Get system statistics and health information."""
-        try:
-            chunk_count = await self.bigquery_client.get_chunk_count()
-            cache_stats = await self.vector_search.get_cache_stats()
-            
-            return {
-                "total_chunks": chunk_count,
-                "cache_hit_rate": cache_stats.get("hit_rate", 0.0),
-                "system_status": "healthy",
-                "last_updated": cache_stats.get("last_updated")
+        # Execute query
+        query_job = self.bq_client.query(query)
+        results = query_job.result()
+        
+        # Convert to list of dictionaries
+        chunks = []
+        for row in results:
+            chunk = {
+                'chunk_id': row.chunk_id,
+                'content': row.content,
+                'source': row.source,
+                'page_number': row.page_number,
+                'safety_level': row.safety_level,
+                'similarity': row.similarity
             }
-        except Exception as e:
-            logger.error(f"Error getting system stats: {e}")
-            return {"system_status": "error", "error": str(e)} 
+            chunks.append(chunk)
+        
+        return chunks
+    
+    def _generate_response(
+        self,
+        query: str,
+        chunks: List[Dict],
+        skill_level: str
+    ) -> str:
+        """Generate response using retrieved chunks.
+        
+        Args:
+            query: User's question
+            chunks: Retrieved relevant chunks
+            skill_level: User's skill level
+            
+        Returns:
+            Generated response
+        """
+        # Construct prompt
+        context = "\n\n".join(
+            [f"Source: {c['source']} (Page {c['page_number']})\n{c['content']}"
+             for c in chunks]
+        )
+        
+        prompt = f"""You are a Husqvarna 701 motorcycle technical expert.
+        Answer the following question for a {skill_level} user.
+        Use ONLY the provided context. If you cannot answer from the context,
+        say so.
+        
+        Context:
+        {context}
+        
+        Question: {query}
+        
+        Answer:"""
+        
+        # Check for safety warnings
+        has_safety_warning = any(c['safety_level'] >= 2 for c in chunks)
+        
+        # Generate response
+        response = self.llm.predict(prompt).text
+        
+        # Add safety warning if needed
+        if has_safety_warning:
+            response = (
+                "⚠️ SAFETY WARNING: This procedure involves safety risks. "
+                "Follow all safety guidelines carefully.\n\n"
+            ) + response
+        
+        return response 

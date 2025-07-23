@@ -7,7 +7,7 @@ app:
   port: 8000
 
 database:
-  dataset_id: "husqvarna_rag_dataset_prod"
+  dataset_id: "husqvarna_rag_dataset"
   table_id: "document_chunks"
   location: "us-central1"
 
@@ -19,11 +19,11 @@ models:
 
 cache:
   ttl_hours: 24
-  max_size: 5000
+  max_size: 1000
   redis_url: "${REDIS_URL}"
 
 safety:
-  min_safety_level: 2
+  min_safety_level: 1
   emphasize_warnings: true
   safety_keywords:
     - "danger"

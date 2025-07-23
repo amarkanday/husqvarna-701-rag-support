@@ -1,41 +1,16 @@
-# Core dependencies
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
-
-# Google Cloud
-google-cloud-aiplatform==1.38.1
-google-cloud-bigquery==3.13.0
-google-cloud-storage==2.10.0
-google-auth==2.23.4
-
-# AI/ML
-vertexai==0.0.1
-langchain==0.0.350
-langchain-google-vertexai==0.0.1
-sentence-transformers==2.2.2
-
-# Data processing
-pandas==2.1.4
-numpy==1.24.3
-PyPDF2==3.0.1
-python-docx==1.1.0
-
-# Utilities
-python-multipart==0.0.6
-httpx==0.25.2
-redis==5.0.1
-structlog==23.2.0
-click==8.1.7
-rich==13.7.0
-
-# Monitoring and metrics
-prometheus-client==0.19.0
-opentelemetry-api==1.21.0
-opentelemetry-sdk==1.21.0
-
-# Security
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-python-multipart==0.0.6 
+google-cloud-bigquery>=3.11.4
+google-cloud-aiplatform>=1.35.0
+fastapi>=0.104.1
+uvicorn>=0.24.0
+python-dotenv>=1.0.0
+pydantic>=2.4.2
+numpy>=1.24.3
+pandas>=2.0.3
+pytest>=7.4.3
+black>=23.10.1
+isort>=5.12.0
+flake8>=6.1.0
+mypy>=1.6.1
+pre-commit>=3.5.0
+python-multipart>=0.0.6
+requests>=2.31.0 
