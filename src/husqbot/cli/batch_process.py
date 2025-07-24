@@ -1,87 +1,130 @@
 import click
+import logging
 from pathlib import Path
-import subprocess
 import time
+from typing import List, Tuple
 
 
-def process_manual_parts(
-    manual_type: str,
-    project_id: str,
-    start_part: int = 1
-):
-    """Process all parts of a manual sequentially.
-    
-    Args:
-        manual_type: Type of manual (owners/repair)
-        project_id: Google Cloud project ID
-        start_part: Part number to start from
-    """
-    # Get the split directory
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+def get_manual_parts(manual_type: str) -> List[Tuple[str, int]]:
+    """Get all parts for a manual type."""
     data_dir = Path(__file__).parent.parent.parent.parent / "data"
     split_dir = data_dir / "raw" / f"{manual_type}_manual" / "split"
+    parts = []
     
-    # Get all parts
-    parts = sorted(split_dir.glob("*_part*.pdf"))
-    if not parts:
-        print("No parts found for", manual_type, "manual")
-        return
+    # om = owner's manual, rm = repair manual
+    prefix = "om" if manual_type == "owners" else "rm"
+    pattern = f"husky_{prefix}_701_part*.pdf"
+    logger.debug(f"Searching for pattern: {pattern} in {split_dir}")
+    for file in sorted(split_dir.glob(pattern)):
+        part_num = int(file.stem.split("part")[-1])
+        parts.append((manual_type, part_num))
     
-    total_parts = len(parts)
-    print(f"Found {total_parts} parts for {manual_type} manual")
-    
-    # Process each part
-    for part_num in range(start_part, total_parts + 1):
-        msg = f"\nProcessing {manual_type} manual part {part_num}"
-        print(f"{msg} of {total_parts}")
-        
-        try:
-            # Run the process-part command
-            cmd = [
-                "python", "-m", "husqbot.cli.main",
-                "process-part",
-                "--project-id", project_id,
-                "--manual-type", manual_type,
-                "--part-number", str(part_num)
-            ]
-            
-            subprocess.run(cmd, check=True)
-            print(f"Successfully processed part {part_num}")
-            
-            # Add a small delay between parts
-            time.sleep(2)
-            
-        except subprocess.CalledProcessError as e:
-            print(f"Error processing part {part_num}: {e}")
-            print("Stopping processing")
-            break
-        except Exception as e:
-            print(f"Unexpected error processing part {part_num}: {e}")
-            print("Stopping processing")
-            break
+    logger.debug(f"Found {len(parts)} parts for {manual_type} manual")
+    return parts
 
 
 @click.command()
 @click.option(
     '--project-id',
-    required=True,
-    help='Google Cloud project ID'
+    envvar='GOOGLE_CLOUD_PROJECT',
+    help='Google Cloud project ID',
+    required=True
 )
 @click.option(
-    '--manual-type',
+    '--location',
+    default='us-central1',
+    help='Google Cloud region'
+)
+@click.option(
+    '--start-from-manual',
     type=click.Choice(['owners', 'repair']),
-    required=True,
-    help='Type of manual to process'
+    default='owners',
+    help='Which manual to start processing from'
 )
 @click.option(
-    '--start-part',
+    '--start-from-part',
     type=int,
     default=1,
-    help='Part number to start from'
+    help='Which part number to start from'
 )
-def main(project_id: str, manual_type: str, start_part: int):
-    """Process all parts of a manual."""
-    process_manual_parts(manual_type, project_id, start_part)
+@click.option(
+    '--store-embeddings',
+    is_flag=True,
+    help='Generate and store embeddings'
+)
+def process_all(
+    project_id: str,
+    location: str,
+    start_from_manual: str,
+    start_from_part: int,
+    store_embeddings: bool
+):
+    """Process all manual parts in sequence."""
+    from husqbot.data.process_manuals import process_single_manual
+    
+    # Get all parts for both manuals
+    all_parts = []
+    if start_from_manual == 'owners':
+        logger.debug("Getting owners manual parts")
+        all_parts.extend(get_manual_parts('owners'))
+    logger.debug("Getting repair manual parts")
+    all_parts.extend(get_manual_parts('repair'))
+    
+    logger.debug(f"Total parts to process: {len(all_parts)}")
+    
+    # Filter based on start position
+    started = False
+    for manual_type, part_num in all_parts:
+        if not started:
+            if (manual_type == start_from_manual and
+                    part_num >= start_from_part):
+                started = True
+                logger.debug(
+                    f"Starting from {manual_type} manual part {part_num}"
+                )
+            else:
+                logger.debug(
+                    f"Skipping {manual_type} manual part {part_num}"
+                )
+                continue
+                
+        logger.info(f"Processing {manual_type} manual part {part_num}")
+        try:
+            # om = owner's manual, rm = repair manual
+            prefix = "om" if manual_type == "owners" else "rm"
+            file_name = (
+                f"husky_{prefix}_701_part{part_num:03d}.pdf"
+            )
+            logger.debug(f"Processing file: {file_name}")
+            process_single_manual(
+                project_id=project_id,
+                location=location,
+                manual_type=manual_type,
+                input_file=file_name,
+                store_embeddings=store_embeddings
+            )
+            msg = (
+                f"Successfully processed {manual_type} "
+                f"manual part {part_num}"
+            )
+            logger.info(msg)
+            # Small delay between parts to avoid rate limiting
+            time.sleep(2)
+        except Exception as e:
+            msg = (
+                f"Error processing {manual_type} manual "
+                f"part {part_num}: {str(e)}"
+            )
+            logger.error(msg)
+            raise
 
 
 if __name__ == '__main__':
-    main() 
+    process_all() 

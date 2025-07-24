@@ -13,4 +13,10 @@ flake8>=6.1.0
 mypy>=1.6.1
 pre-commit>=3.5.0
 python-multipart>=0.0.6
-requests>=2.31.0 
+requests>=2.31.0
+# Image processing dependencies
+pdf2image>=1.16.0
+pillow>=10.0.0
+pytesseract>=0.3.10
+click>=8.1.0
+vertexai>=1.38.0 

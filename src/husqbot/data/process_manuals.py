@@ -1,76 +1,16 @@
-import os
+import logging
 import json
 from pathlib import Path
+from typing import Optional
+
 from google.cloud import bigquery
-from .document_processor import DocumentProcessor
-from ..models.embeddings import EmbeddingGenerator
+
+from husqbot.data.document_processor import DocumentProcessor
+from husqbot.models.embeddings import EmbeddingGenerator
 
 
-def process_and_store_manuals(
-    project_id: str,
-    location: str = "us-central1",
-    dataset_id: str = "husqvarna_rag_dataset",
-    table_id: str = "document_chunks"
-) -> None:
-    """Process manuals and store chunks in BigQuery.
-    
-    Args:
-        project_id: Google Cloud project ID
-        location: Google Cloud region
-        dataset_id: BigQuery dataset ID
-        table_id: BigQuery table ID
-    """
-    # Initialize processors
-    doc_processor = DocumentProcessor()
-    embedding_generator = EmbeddingGenerator(project_id, location)
-    
-    # Get paths to manuals
-    data_dir = Path(__file__).parent.parent.parent.parent / "data"
-    owners_dir = data_dir / "raw" / "owners_manual"
-    repair_dir = data_dir / "raw" / "repair_manual"
-    
-    # Process owner's manual
-    owners_chunks = []
-    for pdf_file in owners_dir.glob("*.pdf"):
-        chunks = doc_processor.process_pdf(str(pdf_file))
-        owners_chunks.extend(chunks)
-    
-    # Process repair manual
-    repair_chunks = []
-    for pdf_file in repair_dir.glob("*.pdf"):
-        chunks = doc_processor.process_pdf(str(pdf_file))
-        repair_chunks.extend(chunks)
-    
-    # Generate embeddings
-    all_chunks = owners_chunks + repair_chunks
-    chunks_with_embeddings = (
-        embedding_generator.generate_embeddings_for_chunks(all_chunks)
-    )
-    
-    # Store in BigQuery
-    client = bigquery.Client()
-    table_ref = f"{project_id}.{dataset_id}.{table_id}"
-    
-    # Convert chunks to rows
-    rows = []
-    for chunk in chunks_with_embeddings:
-        row = {
-            'chunk_id': chunk['chunk_id'],
-            'content': chunk['content'],
-            'embedding': chunk['embedding'],
-            'source': chunk['source'],
-            'page_number': chunk['page_number'],
-            'safety_level': chunk['safety_level'],
-            'created_at': chunk['created_at']
-        }
-        rows.append(row)
-    
-    # Insert rows
-    errors = client.insert_rows_json(table_ref, rows)
-    if errors:
-        raise RuntimeError(f"Error inserting rows: {errors}")
-    
-    print(f"Successfully processed and stored {len(rows)} chunks")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def process_single_manual(
@@ -80,10 +20,10 @@ def process_single_manual(
     dataset_id: str = "husqvarna_rag_dataset",
     table_id: str = "document_chunks",
     batch_size: int = 5,
-    input_file: str = None,
+    input_file: Optional[str] = None,
     store_embeddings: bool = False
 ) -> None:
-    """Process a single manual and store chunks in BigQuery.
+    """Process a single manual or part of a manual.
     
     Args:
         project_id: Google Cloud project ID
@@ -92,64 +32,54 @@ def process_single_manual(
         dataset_id: BigQuery dataset ID
         table_id: BigQuery table ID
         batch_size: Number of chunks to process at once
-        input_file: Specific PDF file to process
+        input_file: Specific PDF file to process (if None, process all)
         store_embeddings: Whether to generate and store embeddings
     """
-    # Initialize processors
     doc_processor = DocumentProcessor()
     embedding_generator = None
     if store_embeddings:
         embedding_generator = EmbeddingGenerator(project_id, location)
     
-    # Get path to manual
-    if input_file:
-        pdf_files = [Path(input_file)]
-    else:
-        data_dir = Path(__file__).parent.parent.parent.parent / "data"
-        manual_dir = data_dir / "raw" / f"{manual_type}_manual"
-        pdf_files = list(manual_dir.glob("*.pdf"))
+    # Get the data directory
+    data_dir = Path(__file__).parent.parent.parent.parent / "data"
+    split_dir = data_dir / "raw" / f"{manual_type}_manual" / "split"
     
-    # Process manual
-    total_chunks = 0
-    for pdf_file in pdf_files:
-        print(f"Processing {pdf_file}...")
+    # Process the specified file
+    if input_file:
+        pdf_file = split_dir / input_file
+        logger.info(f"Processing {pdf_file}...")
         
-        # Extract chunks from PDF
+        # Extract chunks
         chunks = doc_processor.process_pdf(str(pdf_file))
         
-        # Save chunks to temporary file
-        temp_dir = Path("data/processed/temp")
+        # Create a temporary file to store chunks
+        temp_dir = data_dir / "processed" / "temp"
         temp_dir.mkdir(parents=True, exist_ok=True)
         temp_file = temp_dir / f"{pdf_file.stem}_chunks.json"
         
+        # Save chunks to temporary file
         with open(temp_file, 'w') as f:
             json.dump(chunks, f)
         
-        print(f"Saved {len(chunks)} chunks to {temp_file}")
-        
         # Process chunks in batches
+        client = bigquery.Client()
+        table_ref = f"{project_id}.{dataset_id}.{table_id}"
+        
         with open(temp_file, 'r') as f:
             chunks = json.load(f)
-            
             for i in range(0, len(chunks), batch_size):
                 batch = chunks[i:i + batch_size]
-                print(f"Processing batch {i//batch_size + 1}...")
                 
-                # Generate embeddings if requested
-                if store_embeddings:
-                    batch = embedding_generator.generate_embeddings_for_chunks(
-                        batch
-                    )
+                if store_embeddings and embedding_generator:
+                    texts = [chunk['content'] for chunk in batch]
+                    embeddings = embedding_generator.generate_embeddings(texts)
+                    for chunk, embedding in zip(batch, embeddings):
+                        chunk['embedding'] = embedding
                 else:
-                    # Add placeholder embeddings
                     for chunk in batch:
                         chunk['embedding'] = []
                 
-                # Store batch in BigQuery
-                client = bigquery.Client()
-                table_ref = f"{project_id}.{dataset_id}.{table_id}"
-                
-                # Convert chunks to rows
+                # Prepare rows for BigQuery
                 rows = []
                 for chunk in batch:
                     row = {
@@ -163,24 +93,24 @@ def process_single_manual(
                     }
                     rows.append(row)
                 
-                # Insert rows
+                # Insert into BigQuery
                 errors = client.insert_rows_json(table_ref, rows)
                 if errors:
                     raise RuntimeError(f"Error inserting rows: {errors}")
-                
-                print(f"Stored {len(rows)} chunks from batch")
-                total_chunks += len(rows)
         
         # Clean up temporary file
         temp_file.unlink()
-    
-    print(f"Successfully processed and stored {total_chunks} chunks total")
-
-
-if __name__ == "__main__":
-    # Get project ID from environment variable
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    if not project_id:
-        raise ValueError("GOOGLE_CLOUD_PROJECT environment variable not set")
-    
-    process_and_store_manuals(project_id) 
+    else:
+        # Process all files in the directory
+        pdf_files = sorted(split_dir.glob("*.pdf"))
+        for pdf_file in pdf_files:
+            process_single_manual(
+                project_id=project_id,
+                location=location,
+                manual_type=manual_type,
+                dataset_id=dataset_id,
+                table_id=table_id,
+                batch_size=batch_size,
+                input_file=pdf_file.name,
+                store_embeddings=store_embeddings
+            ) 
